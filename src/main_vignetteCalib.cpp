@@ -227,6 +227,9 @@ int main( int argc, char** argv )
 	if(meanExposure==0) meanExposure = 1;
 
     // main for loop over images to track AR marker
+    //*****************************************************************
+    // memory leack coming from plane2imgX ,plane2imgY ,imgRaw ,image.
+    //*****************************************************************
 	for(int i=0;i<reader->getNumImages();i+=imageSkip)
 	{
         std::vector<aruco::Marker> Markers;
@@ -301,7 +304,7 @@ int main( int argc, char** argv )
 					}
 			}
 
-		images.push_back(image);
+        //images.push_back(image);
 
 #ifdef SHOW_DEBUG_IMAGES
 		// debug-plot.
@@ -369,9 +372,14 @@ int main( int argc, char** argv )
         }
 
 		cv::waitKey(1);
+        cv::waitKey(0);
 #endif //SHOW_DEBUG_IMAGES
-		p2imgX.push_back(plane2imgX);
-		p2imgY.push_back(plane2imgY);
+        //p2imgX.push_back(plane2imgX);
+        //p2imgY.push_back(plane2imgY);
+        delete plane2imgX;
+        delete plane2imgY;
+        delete imgRaw;
+        delete image;
     }//end of for loop over image
 
 
