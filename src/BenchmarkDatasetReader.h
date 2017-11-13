@@ -125,9 +125,9 @@ public:
 			}
 
 			printf("got %d entries and %d files from zipfile!\n", numEntries, (int)files.size());
-			std::sort(files.begin(), files.end());
+                        std::sort(files.begin(), files.end());
 
-		}
+                }
 		loadTimestamps(path+"times.txt");
 
 

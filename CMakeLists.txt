@@ -9,9 +9,9 @@ set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
 
 set(EXECUTABLE_OUTPUT_PATH bin)
 
-find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(LibZip 1.1.1 REQUIRED)
+find_package(Eigen3 REQUIRED)# HINTS D:\\Cpp_Libraries\\libraries\\Eigen3\\share\\eigen3\\cmake)
+find_package(OpenCV REQUIRED)# HINTS D:\\Cpp_Libraries\\libraries\\Opencv_310_2015)
+find_package(LibZip 1.1.1 REQUIRED HINST)
 
 set(CMAKE_CXX_FLAGS
    "${CMAKE_CXX_FLAGS_RELEASE} ${SSE_FLAGS} -std=c++0x"
@@ -32,12 +32,14 @@ add_executable(playDataset src/main_playbackDataset.cpp src/FOVUndistorter.cpp s
 target_link_libraries(playDataset ${OpenCV_LIBS} ${LIBZIP_LIBRARY})
 
 
+if(WIN32)
+	list(APPEND CMAKE_MODULE_PATH "D:\\Cpp_Libraries\\libraries\\aruco\\lib\\cmake")
+else()
+        list(APPEND CMAKE_MODULE_PATH "/usr/local/lib/cmake/")
+endif()
 
-
-
-
-SET(CMAKE_MODULE_PATH ${CMAKE_INSTALL_PREFIX}/lib/cmake/ )
-find_package(aruco)
+#SET(CMAKE_MODULE_PATH ${CMAKE_INSTALL_PREFIX}/lib/cmake/ )
+find_package(aruco REQUIRED)
 
 IF(aruco_FOUND)
 	add_executable(vignetteCalib src/main_vignetteCalib.cpp src/FOVUndistorter.cpp src/PhotometricUndistorter.cpp)

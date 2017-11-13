@@ -28,7 +28,7 @@
  */
 
 
-
+#define SHOW_DEBUG_IMAGES
 
 #include "opencv2/opencv.hpp"
 #include "opencv2/video/tracking.hpp"
@@ -226,7 +226,7 @@ int main( int argc, char** argv )
 
 	if(meanExposure==0) meanExposure = 1;
 
-
+    // main for loop over images to track AR marker
 	for(int i=0;i<reader->getNumImages();i+=imageSkip)
 	{
         std::vector<aruco::Marker> Markers;
@@ -237,6 +237,7 @@ int main( int argc, char** argv )
 		delete img;
 
 		MDetector.detect(InImage,Markers);
+        InImage.release();
 		if(Markers.size() != 1) continue;
 
         std::vector<cv::Point2f> ptsP;
@@ -302,74 +303,76 @@ int main( int argc, char** argv )
 
 		images.push_back(image);
 
-
+#ifdef SHOW_DEBUG_IMAGES
 		// debug-plot.
-		cv::Mat dbgImg(imgRaw->h, imgRaw->w, CV_8UC3);
-		for(int i=0;i<imgRaw->w*imgRaw->h;i++)
-			dbgImg.at<cv::Vec3b>(i) = cv::Vec3b(imgRaw->image[i], imgRaw->image[i], imgRaw->image[i]);
+        cv::Mat dbgImg(imgRaw->h, imgRaw->w, CV_8UC3);
+        for(int i=0;i<imgRaw->w*imgRaw->h;i++)
+            dbgImg.at<cv::Vec3b>(i) = cv::Vec3b(imgRaw->image[i], imgRaw->image[i], imgRaw->image[i]);
 
-		for(int x=0; x<=gw;x+=200)
-			for(int y=0; y<=gh;y+=10)
-			{
-				int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
-				int idxT = (x<gw ? x : gw-1)+((y+10)<gh ? (y+10) : gh-1)*gw;
+        for(int x=0; x<=gw;x+=200)
+            for(int y=0; y<=gh;y+=10)
+            {
+                int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
+                int idxT = (x<gw ? x : gw-1)+((y+10)<gh ? (y+10) : gh-1)*gw;
 
-				int u_dS = plane2imgX[idxS]+0.5;
-				int v_dS = plane2imgY[idxS]+0.5;
+                int u_dS = plane2imgX[idxS]+0.5;
+                int v_dS = plane2imgY[idxS]+0.5;
 
-				int u_dT = plane2imgX[idxT]+0.5;
-				int v_dT = plane2imgY[idxT]+0.5;
+                int u_dT = plane2imgX[idxT]+0.5;
+                int v_dT = plane2imgY[idxT]+0.5;
 
-				if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
-					cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
-			}
-
-
-		for(int x=0; x<=gw;x+=10)
-			for(int y=0; y<=gh;y+=200)
-			{
-				int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
-				int idxT = ((x+10)<gw ? (x+10) : gw-1)+(y<gh ? y : gh-1)*gw;
-
-				int u_dS = plane2imgX[idxS]+0.5;
-				int v_dS = plane2imgY[idxS]+0.5;
-
-				int u_dT = plane2imgX[idxT]+0.5;
-				int v_dT = plane2imgY[idxT]+0.5;
-
-				if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
-					cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
-			}
+                if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
+                    cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
+            }
 
 
+        for(int x=0; x<=gw;x+=10)
+            for(int y=0; y<=gh;y+=200)
+            {
+                int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
+                int idxT = ((x+10)<gw ? (x+10) : gw-1)+(y<gh ? y : gh-1)*gw;
 
-		for(int x=0; x<gw;x++)
-			for(int y=0; y<gh;y++)
-			{
-				int u_d = plane2imgX[x+y*gw]+0.5;
-				int v_d = plane2imgY[x+y*gw]+0.5;
+                int u_dS = plane2imgX[idxS]+0.5;
+                int v_dS = plane2imgY[idxS]+0.5;
 
-				if(!(u_d>1 && v_d >1 && u_d<wI-2 && v_d<hI-2))
-				{
-					plane2imgX[x+y*gw] = NAN;
-					plane2imgY[x+y*gw] = NAN;
-				}
-			}
+                int u_dT = plane2imgX[idxT]+0.5;
+                int v_dT = plane2imgY[idxT]+0.5;
 
-		cv::imshow("inRaw",dbgImg);
+                if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
+                    cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
+            }
 
-		if(rand()%40==0)
-		{
-			char buf[1000];
-			snprintf(buf,1000,"vignetteCalibResult/img%d.png",i);
-			cv::imwrite(buf, dbgImg);
-		}
+
+
+        for(int x=0; x<gw;x++)
+            for(int y=0; y<gh;y++)
+            {
+                int u_d = plane2imgX[x+y*gw]+0.5;
+                int v_d = plane2imgY[x+y*gw]+0.5;
+
+                if(!(u_d>1 && v_d >1 && u_d<wI-2 && v_d<hI-2))
+                {
+                    plane2imgX[x+y*gw] = NAN;
+                    plane2imgY[x+y*gw] = NAN;
+                }
+            }
+        cv::namedWindow("inRaw",cv::WINDOW_NORMAL);
+        cv::resizeWindow("inRaw",dbgImg.size().width/4,dbgImg.size().height/4);
+
+        cv::imshow("inRaw",dbgImg);
+
+        if(rand()%40==0)
+        {
+            char buf[1000];
+            snprintf(buf,1000,"vignetteCalibResult/img%d.png",i);
+            cv::imwrite(buf, dbgImg);
+        }
 
 		cv::waitKey(1);
-
+#endif //SHOW_DEBUG_IMAGES
 		p2imgX.push_back(plane2imgX);
 		p2imgY.push_back(plane2imgY);
-	}
+    }//end of for loop over image
 
 
 	std::ofstream logFile;
@@ -582,7 +585,7 @@ int main( int argc, char** argv )
 				cv::waitKey(50);
 			}
 		}
-	}
+    }
 
 
 
