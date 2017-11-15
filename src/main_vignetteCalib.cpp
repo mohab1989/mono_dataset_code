@@ -29,7 +29,7 @@
 
 
 #define SHOW_DEBUG_IMAGES
-
+#define DISPLAYED_IMAGE_HEIGHT 300
 #include "opencv2/opencv.hpp"
 #include "opencv2/video/tracking.hpp"
 
@@ -45,7 +45,25 @@
 #include <fstream>
 #include <dirent.h>
 #include <algorithm>
+#include <omp.h>
+#include <easy/profiler.h>
+float aspect_ratio=0.0;
 
+int imageSkip=1;
+
+
+int maxIterations=20;
+int outlierTh = 15;
+// grid width for template image.
+int gw = 1000;
+int gh = 1000;
+
+// width of grid relative to marker (fac times marker size)
+float facw = 5;
+float fach = 5;
+
+// remove pixel with absolute gradient larger than this from the optimization.
+int maxAbsGrad = 255;
 
 // reads interpolated element from a uchar* array
 // SSE2 optimization possible
@@ -87,8 +105,9 @@ void displayImage(float* I, int w, int h, std::string name)
 		if(isnanf(I[i])) img.at<cv::Vec3b>(i) = cv::Vec3b(0,0,255);
 		else img.at<cv::Vec3b>(i) = cv::Vec3b(255*(I[i]-vmin) / (vmax-vmin),255*(I[i]-vmin) / (vmax-vmin),255*(I[i]-vmin) / (vmax-vmin));
 	}
-
 	printf("plane image values %f - %f!\n", vmin, vmax);
+    cv::namedWindow(name,cv::WINDOW_NORMAL);
+    cv::resizeWindow(name,DISPLAYED_IMAGE_HEIGHT * aspect_ratio ,DISPLAYED_IMAGE_HEIGHT);
 	cv::imshow(name, img);
 	cv::imwrite("vignetteCalibResult/plane.png", img);
 }
@@ -106,28 +125,11 @@ void displayImageV(float* I, int w, int h, std::string name)
 		}
 
 	}
+    cv::namedWindow(name,cv::WINDOW_NORMAL);
+    cv::resizeWindow(name,DISPLAYED_IMAGE_HEIGHT * aspect_ratio ,DISPLAYED_IMAGE_HEIGHT);
 	cv::imshow(name, img);
 }
 
-
-
-
-int imageSkip=1;
-
-
-int maxIterations=20;
-int outlierTh = 15;
-
-// grid width for template image.
-int gw = 1000;
-int gh = 1000;
-
-// width of grid relative to marker (fac times marker size)
-float facw = 5;
-float fach = 5;
-
-// remove pixel with absolute gradient larger than this from the optimization.
-int maxAbsGrad = 255;
 
 void parseArgument(char* arg)
 {
@@ -179,12 +181,168 @@ void parseArgument(char* arg)
 	printf("could not parse argument \"%s\"!!\n", arg);
 }
 
+void DetectMarker(DatasetReader* reader,int image_id,int wI,int hI,int w_out,int h_out,aruco::MarkerDetector MDetector,
+                  Eigen::Matrix3f K_p2idx_inverse,float meanExposure,float* image,float* plane2imgX,float* plane2imgY){
+    std::vector<aruco::Marker> Markers;
+    ExposureImage* img = reader->getImage(image_id,true, false, false, false);
 
+    cv::Mat InImage;
+    cv::Mat(h_out, w_out, CV_32F, img->image).convertTo(InImage, CV_8U, 1, 0);
+    delete img;
+
+    MDetector.detect(InImage,Markers);
+    InImage.release();
+    if(Markers.size() != 1) return;
+
+    std::vector<cv::Point2f> ptsP;
+    std::vector<cv::Point2f> ptsI;
+    ptsI.push_back(cv::Point2f(Markers[0][0].x, Markers[0][0].y));
+    ptsI.push_back(cv::Point2f(Markers[0][1].x, Markers[0][1].y));
+    ptsI.push_back(cv::Point2f(Markers[0][2].x, Markers[0][2].y));
+    ptsI.push_back(cv::Point2f(Markers[0][3].x, Markers[0][3].y));
+    ptsP.push_back(cv::Point2f(-0.5,0.5));
+    ptsP.push_back(cv::Point2f(0.5,0.5));
+    ptsP.push_back(cv::Point2f(0.5,-0.5));
+    ptsP.push_back(cv::Point2f(-0.5,-0.5));
+
+    cv::Mat Hcv = cv::findHomography(ptsP, ptsI);
+    Eigen::Matrix3f H;
+    H(0,0) = Hcv.at<double>(0,0);
+    H(0,1) = Hcv.at<double>(0,1);
+    H(0,2) = Hcv.at<double>(0,2);
+    H(1,0) = Hcv.at<double>(1,0);
+    H(1,1) = Hcv.at<double>(1,1);
+    H(1,2) = Hcv.at<double>(1,2);
+    H(2,0) = Hcv.at<double>(2,0);
+    H(2,1) = Hcv.at<double>(2,1);
+    H(2,2) = Hcv.at<double>(2,2);
+
+    ExposureImage* imgRaw = reader->getImage(image_id,false, true, false, false);
+
+
+
+
+    Eigen::Matrix3f HK = H*K_p2idx_inverse;
+
+
+    int idx=0;
+    for(int y=0;y<gh;y++)
+        for(int x=0;x<gw;x++)
+        {
+            Eigen::Vector3f pp = HK*Eigen::Vector3f(x,y,1);
+            plane2imgX[idx] = pp[0] / pp[2];
+            plane2imgY[idx] = pp[1] / pp[2];
+            idx++;
+        }
+
+    reader->getUndistorter()->distortCoordinates(plane2imgX, plane2imgY, gw*gh);
+
+    if(imgRaw->exposure_time == 0) imgRaw->exposure_time = 1;
+
+
+    for(int y=0; y<hI;y++)
+        for(int x=0; x<wI;x++)
+            image[x+y*wI] = meanExposure*imgRaw->image[x+y*wI] / imgRaw->exposure_time;
+
+    for(int y=2; y<hI-2;y++)
+        for(int x=2; x<wI-2;x++)
+        {
+            for(int deltax=-2; deltax<3;deltax++)
+                for(int deltay=-2; deltay<3;deltay++)
+                {
+                    if(fabsf(image[x+y*wI] - image[x+deltax+(y+deltay)*wI]) > maxAbsGrad) { image[x+y*wI] = NAN; image[x+deltax+(y+deltay)*wI]=NAN; }
+                }
+        }
+
+#ifdef SHOW_DEBUG_IMAGES
+    // debug-plot.
+    cv::Mat dbgImg(imgRaw->h, imgRaw->w, CV_8UC3);
+    for(int i=0;i<imgRaw->w*imgRaw->h;i++)
+        dbgImg.at<cv::Vec3b>(i) = cv::Vec3b(imgRaw->image[i], imgRaw->image[i], imgRaw->image[i]);
+
+    for(int x=0; x<=gw;x+=200)
+        for(int y=0; y<=gh;y+=10)
+        {
+            int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
+            int idxT = (x<gw ? x : gw-1)+((y+10)<gh ? (y+10) : gh-1)*gw;
+
+            int u_dS = plane2imgX[idxS]+0.5;
+            int v_dS = plane2imgY[idxS]+0.5;
+
+            int u_dT = plane2imgX[idxT]+0.5;
+            int v_dT = plane2imgY[idxT]+0.5;
+
+            if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
+                cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
+        }
+
+
+    for(int x=0; x<=gw;x+=10)
+        for(int y=0; y<=gh;y+=200)
+        {
+            int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
+            int idxT = ((x+10)<gw ? (x+10) : gw-1)+(y<gh ? y : gh-1)*gw;
+
+            int u_dS = plane2imgX[idxS]+0.5;
+            int v_dS = plane2imgY[idxS]+0.5;
+
+            int u_dT = plane2imgX[idxT]+0.5;
+            int v_dT = plane2imgY[idxT]+0.5;
+
+            if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
+                cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
+        }
+
+
+
+    for(int x=0; x<gw;x++)
+        for(int y=0; y<gh;y++)
+        {
+            int u_d = plane2imgX[x+y*gw]+0.5;
+            int v_d = plane2imgY[x+y*gw]+0.5;
+
+            if(!(u_d>1 && v_d >1 && u_d<wI-2 && v_d<hI-2))
+            {
+                plane2imgX[x+y*gw] = NAN;
+                plane2imgY[x+y*gw] = NAN;
+            }
+        }
+    cv::namedWindow("inRaw",cv::WINDOW_NORMAL);
+    cv::resizeWindow("inRaw",DISPLAYED_IMAGE_HEIGHT * aspect_ratio ,DISPLAYED_IMAGE_HEIGHT);
+
+    cv::imshow("inRaw",dbgImg);
+
+//    if(rand()%40==0)
+//    {
+//        char buf[1000];
+//        snprintf(buf,1000,"vignetteCalibResult/img%d.png",image_id);
+//        cv::imwrite(buf, dbgImg);
+//    }
+
+    cv::waitKey(1);
+    //cv::waitKey(0);
+#else
+    for(int x=0; x<gw;x++)
+        for(int y=0; y<gh;y++)
+        {
+            int u_d = plane2imgX[x+y*gw]+0.5;
+            int v_d = plane2imgY[x+y*gw]+0.5;
+
+            if(!(u_d>1 && v_d >1 && u_d<wI-2 && v_d<hI-2))
+            {
+                plane2imgX[x+y*gw] = NAN;
+                plane2imgY[x+y*gw] = NAN;
+            }
+        }
+#endif //SHOW_DEBUG_IMAGES
+delete imgRaw;
+}//end of DetectMarker
 
 
 
 int main( int argc, char** argv )
 {
+    EASY_PROFILER_ENABLE
 	for(int i=2; i<argc;i++)
 		parseArgument(argv[i]);
 
@@ -215,8 +373,9 @@ int main( int argc, char** argv )
 	std::vector<float*> p2imgX;
 	std::vector<float*> p2imgY;
 
-	int wI = reader->getUndistorter()->getInputDims()[0];
-	int hI = reader->getUndistorter()->getInputDims()[1];
+    int wI = reader->getUndistorter()->getInputDims()[0];
+    int hI = reader->getUndistorter()->getInputDims()[1];
+    aspect_ratio= static_cast<float>(wI)/static_cast<float>(hI);
 
 
 	float meanExposure = 0;
@@ -224,172 +383,14 @@ int main( int argc, char** argv )
 		meanExposure+=reader->getExposure(i);
 	meanExposure = meanExposure/reader->getNumImages();
 
-	if(meanExposure==0) meanExposure = 1;
-
-    // main for loop over images to track AR marker
-    //*****************************************************************
-    // memory leack coming from plane2imgX ,plane2imgY ,imgRaw ,image.
-    //*****************************************************************
-	for(int i=0;i<reader->getNumImages();i+=imageSkip)
-	{
-        std::vector<aruco::Marker> Markers;
-		ExposureImage* img = reader->getImage(i,true, false, false, false);
-
-		cv::Mat InImage;
-		cv::Mat(h_out, w_out, CV_32F, img->image).convertTo(InImage, CV_8U, 1, 0);
-		delete img;
-
-		MDetector.detect(InImage,Markers);
-        InImage.release();
-		if(Markers.size() != 1) continue;
-
-        std::vector<cv::Point2f> ptsP;
-        std::vector<cv::Point2f> ptsI;
-		ptsI.push_back(cv::Point2f(Markers[0][0].x, Markers[0][0].y));
-		ptsI.push_back(cv::Point2f(Markers[0][1].x, Markers[0][1].y));
-		ptsI.push_back(cv::Point2f(Markers[0][2].x, Markers[0][2].y));
-		ptsI.push_back(cv::Point2f(Markers[0][3].x, Markers[0][3].y));
-		ptsP.push_back(cv::Point2f(-0.5,0.5));
-		ptsP.push_back(cv::Point2f(0.5,0.5));
-		ptsP.push_back(cv::Point2f(0.5,-0.5));
-		ptsP.push_back(cv::Point2f(-0.5,-0.5));
-
-		cv::Mat Hcv = cv::findHomography(ptsP, ptsI);
-		Eigen::Matrix3f H;
-		H(0,0) = Hcv.at<double>(0,0);
-		H(0,1) = Hcv.at<double>(0,1);
-		H(0,2) = Hcv.at<double>(0,2);
-		H(1,0) = Hcv.at<double>(1,0);
-		H(1,1) = Hcv.at<double>(1,1);
-		H(1,2) = Hcv.at<double>(1,2);
-		H(2,0) = Hcv.at<double>(2,0);
-		H(2,1) = Hcv.at<double>(2,1);
-		H(2,2) = Hcv.at<double>(2,2);
-
-		ExposureImage* imgRaw = reader->getImage(i,false, true, false, false);
-
-
-		float* plane2imgX = new float[gw*gh];
-		float* plane2imgY = new float[gw*gh];
-
-		Eigen::Matrix3f HK = H*K_p2idx_inverse;
-
-
-		int idx=0;
-		for(int y=0;y<gh;y++)
-			for(int x=0;x<gw;x++)
-			{
-				Eigen::Vector3f pp = HK*Eigen::Vector3f(x,y,1);
-				plane2imgX[idx] = pp[0] / pp[2];
-				plane2imgY[idx] = pp[1] / pp[2];
-				idx++;
-			}
-
-		reader->getUndistorter()->distortCoordinates(plane2imgX, plane2imgY, gw*gh);
-
-		if(imgRaw->exposure_time == 0) imgRaw->exposure_time = 1;
-
-		float* image = new float[wI*hI];
-		for(int y=0; y<hI;y++)
-			for(int x=0; x<wI;x++)
-				image[x+y*wI] = meanExposure*imgRaw->image[x+y*wI] / imgRaw->exposure_time;
-
-		for(int y=2; y<hI-2;y++)
-			for(int x=2; x<wI-2;x++)
-			{
-				for(int deltax=-2; deltax<3;deltax++)
-					for(int deltay=-2; deltay<3;deltay++)
-					{
-						if(fabsf(image[x+y*wI] - image[x+deltax+(y+deltay)*wI]) > maxAbsGrad) { image[x+y*wI] = NAN; image[x+deltax+(y+deltay)*wI]=NAN; }
-					}
-			}
-
-        //images.push_back(image);
-
-#ifdef SHOW_DEBUG_IMAGES
-		// debug-plot.
-        cv::Mat dbgImg(imgRaw->h, imgRaw->w, CV_8UC3);
-        for(int i=0;i<imgRaw->w*imgRaw->h;i++)
-            dbgImg.at<cv::Vec3b>(i) = cv::Vec3b(imgRaw->image[i], imgRaw->image[i], imgRaw->image[i]);
-
-        for(int x=0; x<=gw;x+=200)
-            for(int y=0; y<=gh;y+=10)
-            {
-                int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
-                int idxT = (x<gw ? x : gw-1)+((y+10)<gh ? (y+10) : gh-1)*gw;
-
-                int u_dS = plane2imgX[idxS]+0.5;
-                int v_dS = plane2imgY[idxS]+0.5;
-
-                int u_dT = plane2imgX[idxT]+0.5;
-                int v_dT = plane2imgY[idxT]+0.5;
-
-                if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
-                    cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
-            }
-
-
-        for(int x=0; x<=gw;x+=10)
-            for(int y=0; y<=gh;y+=200)
-            {
-                int idxS = (x<gw ? x : gw-1)+(y<gh ? y : gh-1)*gw;
-                int idxT = ((x+10)<gw ? (x+10) : gw-1)+(y<gh ? y : gh-1)*gw;
-
-                int u_dS = plane2imgX[idxS]+0.5;
-                int v_dS = plane2imgY[idxS]+0.5;
-
-                int u_dT = plane2imgX[idxT]+0.5;
-                int v_dT = plane2imgY[idxT]+0.5;
-
-                if(u_dS>=0 && v_dS >=0 && u_dS<wI && v_dS<hI && u_dT>=0 && v_dT >=0 && u_dT<wI && v_dT<hI)
-                    cv::line(dbgImg, cv::Point(u_dS, v_dS), cv::Point(u_dT, v_dT), cv::Scalar(0,0,255), 10, CV_AA);
-            }
-
-
-
-        for(int x=0; x<gw;x++)
-            for(int y=0; y<gh;y++)
-            {
-                int u_d = plane2imgX[x+y*gw]+0.5;
-                int v_d = plane2imgY[x+y*gw]+0.5;
-
-                if(!(u_d>1 && v_d >1 && u_d<wI-2 && v_d<hI-2))
-                {
-                    plane2imgX[x+y*gw] = NAN;
-                    plane2imgY[x+y*gw] = NAN;
-                }
-            }
-        cv::namedWindow("inRaw",cv::WINDOW_NORMAL);
-        cv::resizeWindow("inRaw",dbgImg.size().width/4,dbgImg.size().height/4);
-
-        cv::imshow("inRaw",dbgImg);
-
-        if(rand()%40==0)
-        {
-            char buf[1000];
-            snprintf(buf,1000,"vignetteCalibResult/img%d.png",i);
-            cv::imwrite(buf, dbgImg);
-        }
-
-		cv::waitKey(1);
-        cv::waitKey(0);
-#endif //SHOW_DEBUG_IMAGES
-        //p2imgX.push_back(plane2imgX);
-        //p2imgY.push_back(plane2imgY);
-        delete plane2imgX;
-        delete plane2imgY;
-        delete imgRaw;
-        delete image;
-    }//end of for loop over image
-
+    if(meanExposure==0) meanExposure = 1;
 
 	std::ofstream logFile;
 	logFile.open("vignetteCalibResult/log.txt", std::ios::trunc | std::ios::out);
 	logFile.precision(15);
 
 
-
-	int n = images.size();
+    //int n = images.size();
 	float* planeColor = new float[gw*gh];
 	float* planeColorFF = new float[gw*gh];
 	float* planeColorFC = new float[gw*gh];
@@ -403,6 +404,7 @@ int main( int argc, char** argv )
 
 	double E=0;
 	double R=0;
+
 	for(int it=0;it<maxIterations;it++)
 	{
 		int oth2 = outlierTh*outlierTh;
@@ -412,42 +414,59 @@ int main( int argc, char** argv )
 		memset(planeColorFF,0,gw*gh*sizeof(float));
 		memset(planeColorFC,0,gw*gh*sizeof(float));
 		E=0;R=0;
+        printf("number of threads: %d\n", omp_get_max_threads());
+        fflush(stdout);
 
 		// for each plane pixel, it's optimum is at sum(CF)/sum(FF)
-		for(int img=0;img<n;img++)	// for all images
+//#pragma omp parallel for shared(planeColor,planeColorFF,planeColorFC,vignetteFactor,E,R,K_p2idx_inverse,reader,MDetector)
+        for(int img=0;img< reader->getNumImages();img+=imageSkip)	// for all images
 		{
-			float* plane2imgX = p2imgX[img];
-			float* plane2imgY = p2imgY[img];
-			float* image = images[img];
+            //printf("thread id %d\n", omp_get_thread_num());
+            printf("optimize planeColor (iteration,image): (%d,%d)\n",it,img);
+            fflush(stdout);
 
-			for(int pi=0;pi<gw*gh;pi++)		// for all plane points
-			{
-				if(isnanf(plane2imgX[pi])) continue;
+            float* plane2imgX = new float[gw*gh];
+            float* plane2imgY = new float[gw*gh];
+            float* image = new float[wI*hI];
 
-				// get vignetted color at that point, and add to build average.
-				float color = getInterpolatedElement(image, plane2imgX[pi], plane2imgY[pi], wI);
-				float fac = getInterpolatedElement(vignetteFactor, plane2imgX[pi], plane2imgY[pi], wI);
+//#pragma omp parallel private(MDetector,K_p2idx_inverse)
+            {
+                DetectMarker(reader,img,wI,hI,w_out,h_out,MDetector,K_p2idx_inverse,meanExposure,image,plane2imgX,plane2imgY);
+            }
+//#pragma omp parallel for
+            for(int pi=0;pi<gw*gh;pi++)		// for all plane points
+            {
+                //printf("thread id %d\n", omp_get_thread_num());
+                //fflush(stdout);
+                if(isnanf(plane2imgX[pi])) continue;
+                // get vignetted color at that point, and add to build average.
+                float color = getInterpolatedElement(image, plane2imgX[pi], plane2imgY[pi], wI);
+                float fac = getInterpolatedElement(vignetteFactor, plane2imgX[pi], plane2imgY[pi], wI);
 
-				if(isnanf(fac)) continue;
-				if(isnanf(color)) continue;
+                if(isnanf(fac)) continue;
+                if(isnanf(color)) continue;
 
-				double residual = (double)((color - planeColor[pi]*fac)*(color - planeColor[pi]*fac));
-				if(abs(residual) > oth2)
-				{
-					E += oth2;
-					R ++;
-					continue;
-				}
+                double residual = (double)((color - planeColor[pi]*fac)*(color - planeColor[pi]*fac));
+                if(abs(residual) > oth2)
+                {
+                    E += oth2;
+                    R ++;
+                    continue;
+                }
+                bool skip_iteration = false;
 
-
-				planeColorFF[pi] += fac*fac;
-				planeColorFC[pi] += color*fac;
-
-				if(isnanf(planeColor[pi])) continue;
-				E += residual;
-				R ++;
-			}
-		}
+                planeColorFF[pi] += fac*fac;
+                planeColorFC[pi] += color*fac;
+                if(isnanf(planeColor[pi])) skip_iteration = true;
+                if(skip_iteration) continue;
+                E += residual;
+                R ++;
+                }
+            delete plane2imgX;
+            delete plane2imgY;
+            delete image;
+        }// end of for loop over images in optimize planecolor
+        //continue;
 
 		for(int pi=0;pi<gw*gh;pi++)		// for all plane points
 		{
@@ -469,11 +488,18 @@ int main( int argc, char** argv )
 		memset(vignetteFactorCT,0,hI*wI*sizeof(float));
 		E=0;R=0;
 
-		for(int img=0;img<n;img++)	// for all images
+        for(int img=0;img<reader->getNumImages();img+=imageSkip)	// for all images
 		{
-			float* plane2imgX = p2imgX[img];
-			float* plane2imgY = p2imgY[img];
-			float* image = images[img];
+            printf("optimize vignette (iteration,image): (%d,%d)",it,img);
+            fflush(stdout);
+//			float* plane2imgX = p2imgX[img];
+//			float* plane2imgY = p2imgY[img];
+//			float* image = images[img];
+            float* plane2imgX = new float[gw*gh];
+            float* plane2imgY = new float[gw*gh];
+            float* image = new float[wI*hI];
+
+            DetectMarker(reader,img,wI,hI,w_out,h_out,MDetector,K_p2idx_inverse,meanExposure,image,plane2imgX,plane2imgY);
 
 			for(int pi=0;pi<gw*gh;pi++)		// for all plane points
 			{
@@ -517,7 +543,10 @@ int main( int argc, char** argv )
 				E += residual;
 				R ++;
 			}
-		}
+            delete plane2imgX;
+            delete plane2imgY;
+            delete image;
+        }// end of images for loop in optimize vignette
 
 		float maxFac=0;
 		for(int pi=0;pi<hI*wI;pi++)		// for all plane points
@@ -539,7 +568,7 @@ int main( int argc, char** argv )
 
 
 
-		logFile << it << " " << n << " " << R << " " << sqrtf(E/R) << "\n";
+        logFile << it << " " << reader->getNumImages() << " " << R << " " << sqrtf(E/R) << "\n";
 
 
 
@@ -593,7 +622,8 @@ int main( int argc, char** argv )
 				cv::waitKey(50);
 			}
 		}
-    }
+    }// end of optimization iteration
+    //exit(0);
 
 
 
@@ -608,12 +638,12 @@ int main( int argc, char** argv )
 	delete[] vignetteFactorCT;
 
 
-	for(int i=0;i<n;i++)
-	{
-		delete[] images[i];
-		delete[] p2imgX[i];
-		delete[] p2imgY[i];
-	}
+//	for(int i=0;i<n;i++)
+//	{
+//		delete[] images[i];
+//		delete[] p2imgX[i];
+//		delete[] p2imgY[i];
+//	}
 
 
 	delete reader;
